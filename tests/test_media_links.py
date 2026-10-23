@@ -27,7 +27,13 @@ from src.db import (
     get_session_factory,
 )
 from src.mcp.auth import set_allowed_ids
-from src.telegram.client import TelegramListener, media_summary
+from src.telegram.client import (
+    TelegramListener,
+    _convert_datetime,
+    media_kind_of,
+    media_summary,
+)
+from telethon import types as tt
 
 TG_CHAT = 1600
 
@@ -125,6 +131,58 @@ NO_MEDIA_MSG = SimpleNamespace(
 )
 
 
+def _legacy_blob(kind: str) -> dict:
+    """raw_json["media"] as stored BEFORE the media-links feature: the full
+    telethon to_dict() blob, no "kind". Built from real telethon objects so
+    the fixtures match actual DB shapes (no real blobs in the public repo).
+    """
+    photo = _photo()
+
+    def document(attributes, mime_type="application/octet-stream"):
+        return tt.MessageMediaDocument(document=tt.Document(
+            id=1, access_hash=2, file_reference=b"", date=None, dc_id=1,
+            mime_type=mime_type, size=3, thumbs=None, video_thumbs=None,
+            attributes=attributes,
+        ))
+
+    builders = {
+        "photo": lambda: tt.MessageMediaPhoto(photo=photo, ttl_seconds=None),
+        "voice": lambda: document(
+            [tt.DocumentAttributeAudio(duration=5, voice=True)], "audio/ogg"
+        ),
+        "audio": lambda: document(
+            [tt.DocumentAttributeAudio(duration=5, voice=False)], "audio/mpeg"
+        ),
+        "video_note": lambda: document(
+            _video_attrs(True),
+            "video/mp4",
+        ),
+        "video": lambda: document(
+            _video_attrs(False), "video/mp4"
+        ),
+        "animation": lambda: document(
+            [tt.DocumentAttributeAnimated()] + _video_attrs(False),
+            "video/mp4",
+        ),
+        "sticker": lambda: document(
+            [tt.DocumentAttributeSticker(alt="a", stickerset=tt.InputStickerSetEmpty())],
+            "image/webp",
+        ),
+        "document": lambda: document([tt.DocumentAttributeFilename(file_name="f.bin")]),
+    }
+    # Как в проде: to_dict() хранит bytes, в raw_json они попадают уже
+    # после _convert_datetime (base64).
+    return _convert_datetime(builders[kind]().to_dict())
+
+
+def _webpage_blob(with_photo: bool) -> dict:
+    webpage = tt.WebPage(
+        id=1, url="u", display_url="d", hash=0,
+        photo=_photo() if with_photo else None,
+    )
+    return _convert_datetime(tt.MessageMediaWebPage(webpage=webpage).to_dict())
+
+
 async def _seed_chat() -> int:
     """One watching chat; returns the internal id used by tools."""
     async with get_session_factory()() as session:
@@ -194,6 +252,118 @@ def test_kind_priority_specific_over_generic():
     assert media_summary(mp4_gif)["kind"] == "animation"
 
 
+# ----- media_kind_of (read side: compact summary or legacy blob) ----------
+
+
+def _photo():
+    return tt.Photo(id=1, access_hash=2, file_reference=b"", date=None, dc_id=1, sizes=[])
+
+
+def _document(mime_type, attributes):
+    return tt.Document(
+        id=1, access_hash=2, file_reference=b"", date=None, dc_id=1,
+        mime_type=mime_type, size=3, thumbs=None, video_thumbs=None,
+        attributes=attributes,
+    )
+
+
+def _real_message(media) -> tt.Message:
+    """Настоящий telethon.tl.custom.Message: оракул строится на нём, а не на
+    SimpleNamespace, чтобы паритет запись/чтение проверялся на реальных
+    свойствах (Message.photo/.document/.video...), как в проде."""
+    return tt.Message(
+        id=1, peer_id=tt.PeerUser(1), date=datetime(2026, 10, 24, tzinfo=timezone.utc),
+        message="", media=media,
+    )
+
+
+def _doc_media(mime_type, attributes):
+    return tt.MessageMediaDocument(document=_document(mime_type, attributes))
+
+
+def _webpage_media(photo=None, document=None):
+    return tt.MessageMediaWebPage(webpage=tt.WebPage(
+        id=1, url="u", display_url="d", hash=0, photo=photo, document=document,
+    ))
+
+
+def _video_attrs(round_message):
+    return [tt.DocumentAttributeVideo(duration=5, w=1, h=1, round_message=round_message)]
+
+# (имя, media, ожидаемый kind). Ожидание для пустых оболочек — None, но его
+# даёт media_summary: паритет-проверка ниже ловит любое расхождение.
+ORACLE_CASES = [
+    ("photo", lambda: tt.MessageMediaPhoto(photo=_photo(), ttl_seconds=None), "photo"),
+    ("video", lambda: _doc_media("video/mp4", _video_attrs(False)), "video"),
+    ("video_note", lambda: _doc_media("video/mp4", _video_attrs(True)), "video_note"),
+    ("animation", lambda: _doc_media(
+        "video/mp4", [tt.DocumentAttributeAnimated()] + _video_attrs(False)), "animation"),
+    ("voice", lambda: _doc_media(
+        "audio/ogg", [tt.DocumentAttributeAudio(duration=5, voice=True)]), "voice"),
+    ("audio", lambda: _doc_media(
+        "audio/mpeg", [tt.DocumentAttributeAudio(duration=5, voice=False)]), "audio"),
+    ("sticker", lambda: _doc_media(
+        "image/webp",
+        [tt.DocumentAttributeSticker(alt="a", stickerset=tt.InputStickerSetEmpty())]), "sticker"),
+    ("document", lambda: _doc_media(
+        "application/octet-stream", [tt.DocumentAttributeFilename(file_name="f.bin")]), "document"),
+    ("webpage_photo", lambda: _webpage_media(photo=_photo()), "photo"),
+    ("webpage_video_doc", lambda: _webpage_media(
+        document=_document("video/mp4", _video_attrs(False))), "video"),
+    ("webpage_photo_and_video_doc", lambda: _webpage_media(
+        photo=_photo(), document=_document("video/mp4", _video_attrs(False))), "video"),
+    ("webpage_photo_and_plain_doc", lambda: _webpage_media(
+        photo=_photo(),
+        document=_document("application/octet-stream",
+                           [tt.DocumentAttributeFilename(file_name="f.bin")])), "photo"),
+    ("webpage_plain_doc", lambda: _webpage_media(
+        document=_document("application/octet-stream",
+                           [tt.DocumentAttributeFilename(file_name="f.bin")])), "document"),
+    ("webpage_empty", lambda: _webpage_media(), None),
+    ("photo_empty", lambda: tt.MessageMediaPhoto(photo=tt.PhotoEmpty(id=1), ttl_seconds=None), None),
+    ("document_empty", lambda: tt.MessageMediaDocument(document=tt.DocumentEmpty(id=1)), None),
+]
+
+
+@pytest.mark.parametrize("kind", [
+    "photo", "voice", "video_note", "animation", "audio", "sticker",
+    "video", "document",
+])
+def test_media_kind_of_legacy_blob_per_form(kind):
+    assert media_kind_of(_legacy_blob(kind)) == kind
+
+
+def test_media_kind_of_legacy_webpage():
+    assert media_kind_of(_webpage_blob(with_photo=True)) == "photo"
+    assert media_kind_of(_webpage_blob(with_photo=False)) is None
+
+
+def test_media_kind_of_unknown_and_non_dict_is_none():
+    assert media_kind_of({"_": "MessageMediaGeo", "geo": {"_": "GeoPoint"}}) is None
+    assert media_kind_of({"mime_type": "image/jpeg"}) is None
+    assert media_kind_of("not a dict") is None
+    assert media_kind_of(None) is None
+
+
+def test_media_kind_of_compact_summary_wins_over_legacy_fields():
+    blob = _legacy_blob("video")
+    blob["kind"] = "photo"  # сводка записана позже — её kind главнее атрибутов
+    assert media_kind_of(blob) == "photo"
+
+
+@pytest.mark.parametrize("name, media, expected", ORACLE_CASES)
+def test_media_kind_of_matches_media_summary_on_real_messages(name, media, expected):
+    """Сквозная защита от расхождения на настоящем telethon Message:
+    media_summary (запись на лету) и media_kind_of (чтение легаси-блоба
+    из to_dict()) обязаны дать одинаковый kind. Пустые оболочки (WebPageEmpty,
+    PhotoEmpty, DocumentEmpty) дают None с обеих сторон."""
+    message = _real_message(media())
+    blob = message.to_dict()["media"]
+    summary_kind = (media_summary(message) or {}).get("kind")
+    assert media_kind_of(blob) == summary_kind
+    assert media_kind_of(blob) == expected
+
+
 async def test_edit_path_keeps_media_kind(db):
     """MessageEdited пишет в raw_json полный to_dict(); сводка должна ставиться
     и там, иначе у отредактированной строки kind пропадает (свип с равным
@@ -236,6 +406,68 @@ async def test_has_media_true_finds_live_photo_message(db):
     assert [m["message_id"] for m in found["messages"]] == [7]
     assert found["messages"][0]["has_media"] is True
     assert found["messages"][0]["media_kind"] == "photo"
+
+
+async def test_has_media_finds_legacy_blob_row_and_reports_kind(db):
+    """Rows saved before the media-links feature keep the full telethon blob
+    in raw_json["media"] (no "kind"): has_media still finds them, and
+    media_kind comes from media_kind_of instead of being null."""
+    internal = await _seed_chat()
+    now = datetime.now(timezone.utc)
+    async with get_session_factory()() as session:
+        session.add(Message(
+            chat_id=TG_CHAT, message_id=11, date=now,
+            raw_json={"media": _legacy_blob("video_note")},
+        ))
+        await session.commit()
+
+    found = await server_module.read_messages_tool(chat_id=internal, has_media=True)
+
+    assert [m["message_id"] for m in found["messages"]] == [11]
+    assert found["messages"][0]["has_media"] is True
+    assert found["messages"][0]["media_kind"] == "video_note"
+
+
+async def test_search_messages_reports_kind_for_legacy_blob(db):
+    """Legacy rows (full telethon blob, no "kind") must surface the right
+    media_kind in search too: the SQL projection pulls the media node and
+    media_kind_of parses it; a media-less row keeps None."""
+    set_allowed_ids(None)  # search is scope-filtered; другой тест оставляет ∅
+    internal = await _seed_chat()
+    now = datetime.now(timezone.utc)
+    async with get_session_factory()() as session:
+        session.add_all([
+            Message(
+                chat_id=TG_CHAT, message_id=21, date=now,
+                raw_json={"media": _legacy_blob("photo")},
+            ),
+            Message(chat_id=TG_CHAT, message_id=20, date=now, text="plain"),
+        ])
+        await session.commit()
+
+    found = await server_module.search_messages_tool(
+        start_datetime="2026-01-01T00:00:00+00:00"
+    )
+
+    kinds = {m["message_id"]: m["media_kind"] for m in found["messages"]}
+    assert kinds == {21: "photo", 20: None}
+
+
+async def test_get_message_reports_kind_for_legacy_blob(db):
+    """get_message on a pre-feature row (raw_json["media"] is the full telethon
+    blob, no "kind") must report the right media_kind, not null."""
+    internal = await _seed_chat()
+    now = datetime.now(timezone.utc)
+    async with get_session_factory()() as session:
+        session.add(Message(
+            chat_id=TG_CHAT, message_id=13, date=now,
+            raw_json={"media": _legacy_blob("animation")},
+        ))
+        await session.commit()
+
+    found = await server_module.get_message_tool(chat_id=internal, message_id=13)
+
+    assert found["media_kind"] == "animation"
 
 
 # ----- get_media_link tool ------------------------------------------------

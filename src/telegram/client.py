@@ -105,6 +105,65 @@ def media_summary(message) -> Optional[dict]:
     }
 
 
+# Read-side priority, derived so "specific beats generic" stays defined in
+# _MEDIA_KINDS only.
+_KIND_ORDER = tuple(kind for kind, _ in _MEDIA_KINDS)
+
+
+def _document_kind(document: dict) -> Optional[str]:
+    """Kind of a legacy document blob by its attributes; None without markers."""
+    markers = set()
+    for attr in document.get("attributes") or []:
+        name = attr.get("_")
+        if name == "DocumentAttributeAudio":
+            markers.add("voice" if attr.get("voice") else "audio")
+        elif name == "DocumentAttributeVideo":
+            markers.add("video_note" if attr.get("round_message") else "video")
+        elif name == "DocumentAttributeSticker":
+            markers.add("sticker")
+        elif name == "DocumentAttributeAnimated":
+            markers.add("animation")
+    return next((k for k in _KIND_ORDER if k in markers), None)
+
+
+def media_kind_of(media) -> Optional[str]:
+    """Kind of an already-stored raw_json["media"] value.
+
+    Reads both shapes found in the DB: the compact summary written by
+    media_summary ({"kind": ...}) and the legacy full telethon to_dict()
+    blob saved before the summary existed (no "kind", a "_" ctor instead).
+    Empty document/photo shells (DocumentEmpty, PhotoEmpty) count as no
+    media, mirroring the Message.document / Message.photo properties.
+    Unknown or missing shapes yield None — no guessing.
+    """
+    if not isinstance(media, dict):
+        return None
+    if media.get("kind"):
+        return media["kind"]
+    ctor = media.get("_")
+    if ctor == "MessageMediaPhoto":
+        photo = media.get("photo") or {}
+        return "photo" if photo.get("_") == "Photo" else None
+    if ctor == "MessageMediaWebPage":
+        # Link previews can carry an attachment: a document (video, gif,
+        # sticker, audio...) inside the webpage — same markers as usual.
+        webpage = media.get("webpage") or {}
+        document = webpage.get("document") or {}
+        has_document = document.get("_") == "Document"
+        kind = _document_kind(document) if has_document else None
+        if kind:
+            return kind
+        if (webpage.get("photo") or {}).get("_") == "Photo":
+            return "photo"
+        return "document" if has_document else None
+    if ctor == "MessageMediaDocument":
+        document = media.get("document") or {}
+        if document.get("_") != "Document":
+            return None
+        return _document_kind(document) or "document"
+    return None
+
+
 @dataclass
 class TelegramMessage:
     chat_id: int

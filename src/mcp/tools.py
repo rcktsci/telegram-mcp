@@ -12,7 +12,7 @@ from sqlalchemy import select, and_, or_, func, cast, String, text
 from src.db.connection import get_session_factory
 from src.db.models import Chat, Message
 from src.db.repositories import AttachmentDownloadRepository
-from src.telegram.client import TelegramListener
+from src.telegram.client import TelegramListener, media_kind_of
 
 logger = logging.getLogger(__name__)
 
@@ -103,9 +103,8 @@ def _message_filter_conditions(
 
 
 def _media_kind(raw_json: Optional[dict]) -> Optional[str]:
-    """Attachment type from the stored compact summary (raw_json["media"].kind)."""
-    media = (raw_json or {}).get("media")
-    return media.get("kind") if isinstance(media, dict) else None
+    """Attachment type from stored media: compact summary or legacy blob."""
+    return media_kind_of((raw_json or {}).get("media"))
 
 
 async def _get_listener_for_chat(chat_id: int):
@@ -402,9 +401,10 @@ async def search_messages_since(
                     Message.sender_name,
                     Message.date,
                     Message.text,
-                    # Только kind из сводки: raw_json целиком — легаси-блоб
-                    # до сотен КБ на строку, ответ его всё равно не содержит.
-                    Message.raw_json["media"]["kind"].astext.label("media_kind"),
+                    # Только узел media (у новых строк ~100 Б, у легаси 1-2 КБ,
+                    # не весь to_dict-блоб): kind считает media_kind_of, чтобы
+                    # правило разбора оставалось в одной функции.
+                    Message.raw_json["media"].label("media"),
                 )
                 .join(Chat, Chat.chat_id == Message.chat_id)
                 .where(*conditions)
@@ -441,7 +441,7 @@ async def search_messages_since(
                     "sender_name": r.sender_name,
                     "date": r.date.isoformat() if r.date else None,
                     "text": r.text,
-                    "media_kind": r.media_kind,
+                    "media_kind": media_kind_of(r.media),
                 }
                 for r in rows
             ],
