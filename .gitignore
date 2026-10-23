@@ -1,4 +1,4 @@
-# Secrets and local state — never commit
+# Secrets and local state - never commit
 config.yml
 .env
 files/
