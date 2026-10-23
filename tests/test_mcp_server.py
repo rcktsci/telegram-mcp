@@ -15,7 +15,7 @@ async def test_all_tools_registered():
         "read_messages",
         "search_messages",
         "get_chat_members",
-        "get_file",
+        "get_media_link",
         "get_message",
     } <= names, f"missing tools: {names}"
 

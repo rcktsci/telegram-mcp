@@ -2,6 +2,7 @@ import os
 from functools import lru_cache
 from typing import Optional, Literal
 
+from dotenv import dotenv_values
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL
@@ -65,6 +66,15 @@ class LoggingSettings(BaseSettings):
     format: str = "json"
 
 
+class MediaLinksSettings(BaseSettings):
+    """Time-limited public links to cached message media (get_media_link)."""
+    # Public base URL serving /files/<code>; empty = the tool refuses (fail closed)
+    public_url: str = ""
+    ttl_seconds: int = 300
+    max_download_seconds: int = 60
+    max_download_mb: int = 200
+
+
 class Settings(BaseSettings):
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)
@@ -72,6 +82,7 @@ class Settings(BaseSettings):
     history_sweep: HistorySweepSettings = Field(default_factory=HistorySweepSettings)
     webhook: WebhookSettings = Field(default_factory=WebhookSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
+    media_links: MediaLinksSettings = Field(default_factory=MediaLinksSettings)
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -87,6 +98,32 @@ def load_config_from_yaml(config_path: str = "config.yml") -> dict:
         with open(config_path, "r") as f:
             return yaml.safe_load(f) or {}
     return {}
+
+
+def _media_links_settings(yaml_config: dict) -> MediaLinksSettings:
+    """media_links resolution: OS env > .env > config.yml.
+
+    An EMPTY value on any layer counts as absent and falls through to the
+    next one — a copied .env.example (MEDIA_LINKS_PUBLIC_URL=) or a compose
+    passthrough with an empty default must not silence config.yml. Only
+    when every layer is empty does public_url stay "" (fail closed).
+    """
+    yaml_ml = yaml_config.get("media_links") or {}
+
+    def layered(yaml_key: str, env_key: str, default):
+        value = (
+            os.environ.get(env_key)
+            or dotenv_values(".env").get(env_key)
+            or yaml_ml.get(yaml_key)
+        )
+        return value if value is not None else default
+
+    return MediaLinksSettings(
+        public_url=str(layered("public_url", "MEDIA_LINKS_PUBLIC_URL", "")),
+        ttl_seconds=int(layered("ttl_seconds", "MEDIA_LINKS_TTL_SECONDS", 300)),
+        max_download_seconds=int(layered("max_download_seconds", "MEDIA_LINKS_MAX_DOWNLOAD_SECONDS", 60)),
+        max_download_mb=int(layered("max_download_mb", "MEDIA_LINKS_MAX_DOWNLOAD_MB", 200)),
+    )
 
 
 @lru_cache
@@ -147,4 +184,5 @@ def get_settings() -> Settings:
             level=yaml_config.get("logging", {}).get("level", "INFO"),
             format=yaml_config.get("logging", {}).get("format", "json"),
         ),
+        media_links=_media_links_settings(yaml_config),
     )

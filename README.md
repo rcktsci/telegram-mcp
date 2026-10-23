@@ -8,7 +8,7 @@ and exposes them to AI agents over Streamable HTTP (stateless JSON-RPC, JSON res
 - Multi-account Telegram monitoring (Telethon user sessions) into PostgreSQL
 - Hourly history sweep with resume checkpoints (`history_sweep_upto` per chat)
 - Live updates via webhooks + on-demand reads
-- 7 MCP tools: list chats, read/search/count messages, single message, chat members, file download
+- 7 MCP tools: list chats, read/search/count messages, single message, chat members, media links
 - Cross-chat full-text search (Russian + English morphology) and regex filtering
 - Per-token access scoping for agents: Bearer tokens bound to Telegram folders/chats,
   stored in PostgreSQL
@@ -27,9 +27,32 @@ and exposes them to AI agents over Streamable HTTP (stateless JSON-RPC, JSON res
 | `count_messages` | Message counts per chat for a period (respects token scope)                |
 | `get_message`    | Single message by ID                                                       |
 | `get_chat_members`| Chat members via Telegram API                                             |
-| `get_file`       | Download photo/document/voice from a message                               |
+| `get_media_link` | Time-limited public URL for a message's media (cached, served at `/files/<code>`) |
 
 `chat_id` arguments are **internal IDs** from `list_chats`, not Telegram chat IDs.
+
+### Media links
+
+`get_media_link(chat_id, message_id)` returns `{"url", "file_name", "media_kind",
+"mime_type", "size_bytes", "expires_at", "cached"}`. The URL points at the public
+`GET /files/<code>` route on the UI port (8080); the route is unauthenticated by
+owner decision and treats unknown codes, expired TTL and a cache file lost to a
+container recreate identically (404). Settings come from config.yml `media_links`;
+`MEDIA_LINKS_*` variables (OS env, .env, docker-compose) override config.yml when
+non-empty - an EMPTY value falls through to config.yml, and only when empty
+everywhere does the tool refuse to hand out links (fail closed):
+
+| Key                          | Purpose                                             |
+|------------------------------|-----------------------------------------------------|
+| `media_links.public_url`     | Public base URL serving `/files/<code>`; empty everywhere = tool refuses (fail closed) |
+| `media_links.ttl_seconds`    | Link lifetime (default 300)                         |
+| `media_links.max_download_seconds` | Refuse downloads longer than this (default 60) |
+| `media_links.max_download_mb`| Refuse files bigger than this (default 200)         |
+
+The download cache lives in `/app/files` **inside** the container - it is not a
+volume, so recreating the container resets it; previously issued links then 404.
+Treat issued URLs as bearer credentials: anyone with the URL gets the file until
+it expires.
 
 ## Transport and auth
 
@@ -67,7 +90,8 @@ your MCP client at `http://localhost:8001/mcp` with `Authorization: Bearer <agen
 | `history_sweep.interval_hours` | History sweep period (default 6.0)            |
 
 Environment overrides: `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`,
-`UI_MASTER_TOKEN`.
+`UI_MASTER_TOKEN`, `MEDIA_LINKS_PUBLIC_URL`, `MEDIA_LINKS_TTL_SECONDS`,
+`MEDIA_LINKS_MAX_DOWNLOAD_SECONDS`, `MEDIA_LINKS_MAX_DOWNLOAD_MB`.
 
 ## Database
 

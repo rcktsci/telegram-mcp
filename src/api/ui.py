@@ -3,18 +3,21 @@ UI сервер для управления чатами.
 """
 import asyncio
 import logging
+import os
+import re
 import time
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy import select, update, delete, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.db.connection import get_session_factory
 from src.db.models import AuthToken, Chat, Message
-from src.db.repositories import AuthTokenRepository
+from src.db.repositories import AttachmentDownloadRepository, AuthTokenRepository
 from src.telegram.folders import fetch_folders
 
 logger = logging.getLogger(__name__)
@@ -888,3 +891,53 @@ async def get_folders():
     _folders_cache.clear()
     _folders_cache.update({"data": folders, "ts": time.time()})
     return folders
+
+
+# ---- Медиа-ссылки: раздача закэшированных вложений (PLAN media links). ----
+
+_DOWNLOAD_CODE_RE = re.compile(r"[0-9a-f]{32}")
+
+# Отправитель документа задаёт mime_type: CRLF или не-latin1 в значении
+# заголовка ответа отвергаются h11, и ссылка перестаёт работать. Строгий
+# fullmatch, иначе application/octet-stream.
+_MIME_TYPE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,63}/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]{0,63}")
+
+
+def _sanitize_filename(name: Optional[str]) -> Optional[str]:
+    """CR/LF и кавычки в Content-Disposition — header injection; длина ограничена."""
+    if not name:
+        return None
+    cleaned = re.sub(r"[\r\n\"']", "", name).strip()[:150]
+    return cleaned or None
+
+
+def _safe_mime_type(mime_type: Optional[str]) -> str:
+    if mime_type and _MIME_TYPE_RE.fullmatch(mime_type):
+        return mime_type
+    return "application/octet-stream"
+
+
+@ui_app.get("/files/{code}")
+async def get_media_file(code: str):
+    """Отдать вложение по коду из get_media_link.
+
+    Путь вне /api/*, поэтому гейт мастер-токена его не касается — авторизации
+    нет по решению владельца. Неизвестный код, истёкший TTL и потерянный файл
+    (кэш сброшен вместе с контейнером) дают ОДИН И ТОТ ЖЕ 404: код ссылки —
+    bearer-credential, различать случаи нельзя.
+    """
+    row = None
+    if _DOWNLOAD_CODE_RE.fullmatch(code):
+        async with get_session_factory()() as session:
+            row = await AttachmentDownloadRepository(session).get_by_code(code)
+    if (
+        row is None
+        or row.expires_at < datetime.now(timezone.utc)
+        or not os.path.isfile(row.cached_file)
+    ):
+        raise HTTPException(status_code=404, detail="Not found")
+    return FileResponse(
+        row.cached_file,
+        media_type=_safe_mime_type(row.mime_type),
+        filename=_sanitize_filename(row.file_name) or os.path.basename(row.cached_file),
+    )

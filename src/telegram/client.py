@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import mimetypes
+import os
 from datetime import datetime
 from typing import Optional, AsyncGenerator
 from dataclasses import dataclass
@@ -41,6 +43,66 @@ def marked_chat_id(peer) -> int:
     messages under an id no chats row uses.
     """
     return utils.get_peer_id(peer, add_mark=True)
+
+
+# Deterministic cache dir for get_media_link. NO volume mount (owner's call):
+# recreating the container resets the cache, DB rows then 404 (no 500s).
+MEDIA_CACHE_DIR = "/app/files"
+
+# Specific kinds first: video_note/voice/audio/sticker/animation are all
+# documents with extra attributes, and a video_note also matches .video.
+_MEDIA_KINDS = (
+    ("voice", "voice"),
+    ("video_note", "video_note"),
+    ("audio", "audio"),
+    ("sticker", "sticker"),
+    ("animation", "gif"),
+    ("video", "video"),
+    ("photo", "photo"),
+    ("document", "document"),
+)
+
+_KIND_EXT = {
+    "photo": ".jpg",
+    "voice": ".ogg",
+    "video": ".mp4",
+    "video_note": ".mp4",
+    "animation": ".mp4",
+    "sticker": ".webp",
+}
+
+
+def _media_of(message) -> tuple[Optional[str], object]:
+    """(kind, media object) of a Telethon message; (None, None) without media."""
+    for kind, prop in _MEDIA_KINDS:
+        media = getattr(message, prop, None)
+        if media:  # truthiness: props return None or the media object
+            return kind, media
+    return None, None
+
+
+def media_summary(message) -> Optional[dict]:
+    """Compact attachment summary stored in raw_json["media"].
+
+    One shape for all three write paths: the realtime handler (whose raw used
+    to lack "media" entirely, breaking has_media=true), the history pages
+    (which stored the whole telethon to_dict()["media"] blob) and the
+    MessageEdited handler (same to_dict() blob — without this its stored row
+    would lose kind, and an equal edit_date never re-refreshes it via the
+    sweep). Drives has_media filtering and tells the agent the attachment
+    type.
+    """
+    kind, _ = _media_of(message)
+    if kind is None:
+        return None
+    f = getattr(message, "file", None)
+    return {
+        "kind": kind,
+        "mime_type": getattr(f, "mime_type", None),
+        "size": getattr(f, "size", None),
+        "file_name": getattr(f, "name", None),
+        "duration": getattr(f, "duration", None),
+    }
 
 
 @dataclass
@@ -183,6 +245,7 @@ class TelegramListener:
                     "date": message.date.isoformat() if message.date else None,
                     "topic_id": topic_id,
                     "topic_name": topic_name,
+                    "media": media_summary(message),
                 },
                 topic_id=topic_id,
                 topic_name=topic_name,
@@ -224,6 +287,7 @@ class TelegramListener:
                 
                 repo = MessageRepository(session)
                 raw = _convert_datetime(message.to_dict())
+                raw["media"] = media_summary(message)
                 updated = await repo.update_text(event.chat_id, message.id, message.text, raw)
                 if updated:
                     logger.info(f"Message edited: chat={event.chat_id}, msg_id={message.id}")
@@ -733,6 +797,9 @@ class TelegramListener:
             elif reply_to and hasattr(reply_to, 'reply_to_top_id'):
                 topic_id = reply_to.reply_to_top_id or reply_to.reply_to_msg_id
 
+        # Compact summary replaces the full telethon media blob from to_dict().
+        raw_dict["media"] = media_summary(message)
+
         return TelegramMessage(
             chat_id=chat_id,
             message_id=message.id,
@@ -885,82 +952,73 @@ class TelegramListener:
             except asyncio.TimeoutError:
                 continue
 
-    async def download_file(self, chat_id: int, message_id: int, base64_flag: bool = False) -> Optional[dict]:
-        """Скачать файл из сообщения. Сохраняет в /app/files/ если ещё нет. Возвращает dict с путём и metadata."""
+    async def prepare_media_link(
+        self,
+        chat_id: int,
+        message_id: int,
+        max_download_seconds: int,
+        max_download_mb: int,
+    ) -> dict:
+        """Fetch one message by id and serve its media from the cache dir.
+
+        The deterministic cache name ({chat_id}_{message_id}{ext}) makes a
+        repeated call for the same message hit the file, not Telegram: one
+        RPC per call, one download per message ever. Raises ValueError with
+        an agent-readable message on any refusal (no media, limits, download
+        failure) — the tool layer turns that into the usual {"error": ...}.
+        """
         if not self._client:
-            return None
-        
-        import os
-        import hashlib
-        import base64 as b64_module
-        
-        files_dir = "/app/files"
-        os.makedirs(files_dir, exist_ok=True)
-        
-        try:
-            await self.wait_ready(timeout=30)
-            message = await self._client.get_messages(chat_id, ids=message_id)
-            if not message:
-                return None
-            
-            media = message.voice or message.photo or message.document
-            if not media:
-                return None
-            
-            file_bytes = await self._client.download_media(media, bytes)
-            
-            file_hash = hashlib.sha256(file_bytes).hexdigest()[:16]
-            
-            ext = ""
-            if message.voice:
-                ext = ".ogg"
-            elif message.photo:
-                ext = ".jpg"
-            elif message.document:
-                mime = getattr(message.document, 'mime_type', 'application/octet-stream')
-                ext_map = {
-                    'application/pdf': '.pdf',
-                    'application/zip': '.zip',
-                    'application/x-zip-compressed': '.zip',
-                    'text/csv': '.csv',
-                    'application/vnd.ms-excel': '.xls',
-                }
-                ext = ext_map.get(mime, '')
-            
-            filename = f"{chat_id}_{message_id}_{file_hash}{ext}"
-            filepath = os.path.join(files_dir, filename)
-            
-            result = {
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "filename": filename,
-                "size": len(file_bytes),
-            }
-            
-            if os.path.exists(filepath):
-                result["status"] = "already_exists"
-                result["path"] = filepath
-            else:
-                with open(filepath, 'wb') as f:
-                    f.write(file_bytes)
-                result["status"] = "saved"
-                result["path"] = filepath
-            
-            if base64_flag:
-                result["base64"] = b64_module.b64encode(file_bytes).decode('utf-8')
-            
-            if message.voice:
-                result["type"] = "voice"
-                result["duration"] = message.voice.duration
-                result["mime_type"] = message.voice.mime_type
-            elif message.photo:
-                result["type"] = "photo"
-            elif message.document:
-                result["type"] = "document"
-                result["file_name"] = getattr(message.document, 'file_name', None)
-                result["mime_type"] = getattr(message.document, 'mime_type', None)
-            
-            return result
-        except Exception as e:
-            logger.error(f"Failed to download file: {e}")
-            return None
+            raise ValueError("Telegram client is not connected")
+        await self.wait_ready(timeout=30)
+
+        # Один RPC: получить сообщение и его медиа одновременно.
+        message = await self._client.get_messages(chat_id, ids=message_id)
+        if not message:
+            raise ValueError("No media found in message")
+        kind, media = _media_of(message)
+        if kind is None:
+            raise ValueError("No media found in message")
+
+        summary = media_summary(message)
+        ext = _KIND_EXT.get(kind) or (mimetypes.guess_extension(summary["mime_type"] or "") or "")
+        filepath = os.path.join(MEDIA_CACHE_DIR, f"{chat_id}_{message_id}{ext}")
+
+        cached = os.path.exists(filepath)
+        if not cached:
+            max_bytes = max_download_mb * 1024 * 1024
+            if summary["size"] is not None and summary["size"] > max_bytes:
+                raise ValueError(
+                    f"media is {summary['size']} bytes, over max_download_mb={max_download_mb}"
+                )
+            os.makedirs(MEDIA_CACHE_DIR, exist_ok=True)
+            try:
+                file_bytes = await asyncio.wait_for(
+                    self._client.download_media(media, bytes),
+                    timeout=max_download_seconds,
+                )
+            except asyncio.TimeoutError:
+                raise ValueError(
+                    f"download timed out after {max_download_seconds}s (max_download_seconds)"
+                )
+            if not file_bytes:
+                raise ValueError("download failed")
+            # Сначала во временный файл, затем атомарный os.replace: обрыв
+            # посреди записи не оставляет обрезанный файл, который следующий
+            # вызов принял бы за валидный кэш (exists-проверка).
+            tmp_file = filepath + ".tmp"
+            try:
+                with open(tmp_file, "wb") as fh:
+                    fh.write(file_bytes)
+                os.replace(tmp_file, filepath)
+            finally:
+                if os.path.exists(tmp_file):
+                    os.remove(tmp_file)
+
+        return {
+            "cached_file": filepath,
+            "media_kind": kind,
+            "mime_type": summary["mime_type"],
+            "size_bytes": summary["size"],
+            "file_name": summary["file_name"],
+            "cached": cached,
+        }

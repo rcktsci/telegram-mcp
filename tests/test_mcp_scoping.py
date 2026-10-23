@@ -3,8 +3,9 @@
 get_allowed_ids() is None = no authorization happened → nothing is
 restricted; frozenset() = a token without rights → everything forbidden
 (None ≠ ∅). Point tools refuse with a forbidden-error dict BEFORE any
-implementation call (get_file/get_chat_members must not touch Telegram);
-list_chats filters its output; search filters in SQL by INTERNAL id.
+implementation call (get_media_link/get_chat_members must not touch
+Telegram); list_chats filters its output; search filters in SQL by
+INTERNAL id.
 """
 
 from datetime import datetime, timezone
@@ -70,7 +71,7 @@ async def test_list_chats_filters_by_scope(db):
     assert listed["chats"][0]["chat_id"] == first_id
 
 
-async def test_read_get_message_get_file_members_forbidden_on_foreign_chat(db, monkeypatch):
+async def test_read_get_message_get_media_link_members_forbidden_on_foreign_chat(db, monkeypatch):
     first_id, second_id = await _seed_two_chats_with_messages()
     set_allowed_ids(frozenset({first_id}))
 
@@ -81,13 +82,13 @@ async def test_read_get_message_get_file_members_forbidden_on_foreign_chat(db, m
 
     read = await server_module.read_messages_tool(chat_id=second_id)
     message = await server_module.get_message_tool(chat_id=second_id, message_id=1)
-    file = await server_module.get_file_tool(chat_id=second_id, message_id=1)
+    media = await server_module.get_media_link_tool(chat_id=second_id, message_id=1)
     members = await server_module.get_chat_members_tool(chat_id=second_id)
 
     expected = {"error": f"forbidden: chat {second_id} not allowed for this token"}
     assert read == expected
     assert message == expected
-    assert file == expected
+    assert media == expected
     assert members == expected
 
 

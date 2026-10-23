@@ -2,7 +2,7 @@
 
 _get_listener_for_chat builds _user_id_to_listener once. If every session fails
 at startup the map stays {} (not None), so the "uninitialized" guard never fires
-again and get_file/get_chat_members stay dead until process restart.
+again and get_media_link/get_chat_members stay dead until process restart.
 """
 
 import pytest

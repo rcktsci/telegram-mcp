@@ -7,7 +7,7 @@ from sqlalchemy import select, func, and_, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.db.models import AuthToken, Chat, Message
+from src.db.models import AttachmentDownload, AuthToken, Chat, Message
 
 
 class ChatRepository:
@@ -378,3 +378,44 @@ class AuthTokenRepository:
             await self.session.commit()
             return True
         return False
+
+
+class AttachmentDownloadRepository:
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def insert(
+        self,
+        download_code: str,
+        chat_id: int,
+        message_id: int,
+        media_kind: str,
+        cached_file: str,
+        expires_at: datetime,
+        created_at: Optional[datetime] = None,
+        file_name: Optional[str] = None,
+        mime_type: Optional[str] = None,
+        size_bytes: Optional[int] = None,
+    ) -> AttachmentDownload:
+        row = AttachmentDownload(
+            download_code=download_code,
+            chat_id=chat_id,
+            message_id=message_id,
+            media_kind=media_kind,
+            cached_file=cached_file,
+            expires_at=expires_at,
+            created_at=created_at,
+            file_name=file_name,
+            mime_type=mime_type,
+            size_bytes=size_bytes,
+        )
+        self.session.add(row)
+        await self.session.commit()
+        await self.session.refresh(row)
+        return row
+
+    async def get_by_code(self, download_code: str) -> Optional[AttachmentDownload]:
+        result = await self.session.execute(
+            select(AttachmentDownload).where(AttachmentDownload.download_code == download_code)
+        )
+        return result.scalar_one_or_none()

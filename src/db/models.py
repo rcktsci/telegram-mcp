@@ -72,3 +72,25 @@ class AuthToken(Base):
     folder_ids: Mapped[list] = mapped_column(JSONB, default=list)
     chat_ids: Mapped[list] = mapped_column(JSONB, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class AttachmentDownload(Base):
+    __tablename__ = "attachments_downloads"
+    __table_args__ = (
+        Index("idx_attachments_downloads_chat_message", "chat_id", "message_id"),
+        Index("idx_attachments_downloads_expires_at", "expires_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    download_code: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    # BigInteger, not int4: marked channel ids (-100…) overflow int4 —
+    # same as messages.chat_id, which stores these very values.
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    message_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    media_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    file_name: Mapped[Optional[str]] = mapped_column(Text)
+    mime_type: Mapped[Optional[str]] = mapped_column(Text)
+    size_bytes: Mapped[Optional[int]] = mapped_column(BigInteger)
+    cached_file: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

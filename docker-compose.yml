@@ -12,7 +12,7 @@ services:
     restart: unless-stopped
 
   telegram-mcp:
-    image: ghcr.io/rcktsci/telegram-mcp:2026-10-23
+    image: ghcr.io/rcktsci/telegram-mcp:2026-10-24
     pull_policy: always
     build: .
     depends_on:
@@ -25,10 +25,14 @@ services:
       DB_PASSWORD: telegram-mcp
       # Change it, please. If empty - every /api/* request is rejected (fail closed).
       UI_MASTER_TOKEN: ""
+      # Empty default = "not set": the value falls through to config.yml.
+      MEDIA_LINKS_PUBLIC_URL: "${MEDIA_LINKS_PUBLIC_URL:-}"
+      MEDIA_LINKS_TTL_SECONDS: "${MEDIA_LINKS_TTL_SECONDS:-}"
+      MEDIA_LINKS_MAX_DOWNLOAD_SECONDS: "${MEDIA_LINKS_MAX_DOWNLOAD_SECONDS:-}"
+      MEDIA_LINKS_MAX_DOWNLOAD_MB: "${MEDIA_LINKS_MAX_DOWNLOAD_MB:-}"
     ports:
       - "8001:8000/tcp"   # MCP: Streamable HTTP (Bearer = agent token, mint in UI)
       - "8080:8080/tcp"   # UI:  management (login = master token)
     volumes:
-      - ./files:/app/files
       - ./config.yml:/app/config.yml:ro   # cp config.yml.example config.yml, then fill in
     restart: unless-stopped

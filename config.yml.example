@@ -48,3 +48,17 @@ logging:
   level: "INFO"
   # Log format: "json" or "console"
   format: "json"
+
+# Media links: time-limited public URLs for message attachments (get_media_link).
+# Files are cached in /app/files INSIDE the container (no volume): recreating
+# the container resets the cache, old links then 404.
+media_links:
+  # Public base URL where /files/<code> is reachable; empty = the tool
+  # refuses to hand out links (fail closed)
+  public_url: ""
+  # Link lifetime in seconds
+  ttl_seconds: 300
+  # Refuse a download that takes longer than this many seconds
+  max_download_seconds: 60
+  # Refuse files bigger than this many MB
+  max_download_mb: 200

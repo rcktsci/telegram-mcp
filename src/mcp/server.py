@@ -16,7 +16,7 @@ from src.mcp.tools import (
     list_chats,
     read_messages,
     get_chat_members,
-    get_file,
+    get_media_link,
     get_message,
     search_messages_since,
     count_messages,
@@ -97,7 +97,18 @@ def telegram_mcp_guide():
 - Search: `search_regex="pattern"`
 - Full-text: `search_text="модели ИИ"` (RU+EN word forms, websearch syntax:
   `"exact phrase"`, `-exclude`; faster and broader than the regex)
-- Attachments: `has_media=true` (or `false` for strictly messages without files)
+- Attachments: `has_media=true` (or `false` for strictly messages without
+  files); `media_kind` in the result is the type: photo, video, document,
+  voice, audio, animation, sticker, video_note
+
+### Downloading attachments:
+
+- `get_media_link(chat_id, message_id)` returns a time-limited public URL
+  (`media_links.public_url` must be configured, otherwise it errors) plus
+  file metadata: `{"url", "file_name", "media_kind", "mime_type",
+  "size_bytes", "expires_at", "cached"}`. The file downloads once and is
+  then served from cache; give the URL to the user as-is, it dies at
+  `expires_at` and 404s afterwards.
 
 ### Pagination:
 
@@ -203,16 +214,15 @@ async def get_chat_members_tool(chat_id: Annotated[int, Field(description="Inter
     return result
 
 
-@mcp_server.tool(name="get_file")
-async def get_file_tool(
+@mcp_server.tool(name="get_media_link")
+async def get_media_link_tool(
     chat_id: Annotated[int, Field(description="Internal ID from list_chats (not the Telegram chat_id)")],
     message_id: Annotated[int, Field(description="Telegram message ID")],
-    base64: bool = False,
 ):
-    """Download file (photo, document, voice) from message. Uses cache if available. Returns path or base64 content."""
+    """Get a time-limited public URL for the media attached to a message (photo, video, document, voice...). The file is cached server-side and served at GET <url> until expires_at. Returns {"url", "file_name", "media_kind", "mime_type", "size_bytes", "expires_at", "cached"}."""
     if _scope_blocks(chat_id):
         return _forbidden(chat_id)
-    result = await get_file(chat_id=chat_id, message_id=message_id, base64=base64)
+    result = await get_media_link(chat_id=chat_id, message_id=message_id)
     return result
 
 

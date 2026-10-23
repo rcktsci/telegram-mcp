@@ -2,14 +2,16 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from collections.abc import Collection
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 
 from sqlalchemy import select, and_, or_, func, cast, String, text
 
 from src.db.connection import get_session_factory
 from src.db.models import Chat, Message
+from src.db.repositories import AttachmentDownloadRepository
 from src.telegram.client import TelegramListener
 
 logger = logging.getLogger(__name__)
@@ -98,6 +100,12 @@ def _message_filter_conditions(
                 )
             )
     return conditions
+
+
+def _media_kind(raw_json: Optional[dict]) -> Optional[str]:
+    """Attachment type from the stored compact summary (raw_json["media"].kind)."""
+    media = (raw_json or {}).get("media")
+    return media.get("kind") if isinstance(media, dict) else None
 
 
 async def _get_listener_for_chat(chat_id: int):
@@ -313,6 +321,7 @@ async def read_messages(
                     "raw": m.raw_json,
                     "date": m.date.isoformat() if m.date else None,
                     "has_media": bool(m.raw_json and m.raw_json.get("media")),
+                    "media_kind": _media_kind(m.raw_json),
                     "topic_id": m.topic_id,
                     "topic_name": m.topic_name,
                 }
@@ -324,6 +333,7 @@ async def read_messages(
                     "text": m.text,
                     "date": m.date.isoformat() if m.date else None,
                     "has_media": bool(m.raw_json and m.raw_json.get("media")),
+                    "media_kind": _media_kind(m.raw_json),
                     "topic_id": m.topic_id,
                     "topic_name": m.topic_name,
                 }
@@ -392,6 +402,9 @@ async def search_messages_since(
                     Message.sender_name,
                     Message.date,
                     Message.text,
+                    # Только kind из сводки: raw_json целиком — легаси-блоб
+                    # до сотен КБ на строку, ответ его всё равно не содержит.
+                    Message.raw_json["media"]["kind"].astext.label("media_kind"),
                 )
                 .join(Chat, Chat.chat_id == Message.chat_id)
                 .where(*conditions)
@@ -428,6 +441,7 @@ async def search_messages_since(
                     "sender_name": r.sender_name,
                     "date": r.date.isoformat() if r.date else None,
                     "text": r.text,
+                    "media_kind": r.media_kind,
                 }
                 for r in rows
             ],
@@ -519,6 +533,7 @@ async def get_message(
                 "raw": m.raw_json,
                 "date": m.date.isoformat() if m.date else None,
                 "has_media": bool(m.raw_json and m.raw_json.get("media")),
+                "media_kind": _media_kind(m.raw_json),
                 "topic_id": m.topic_id,
                 "topic_name": m.topic_name,
             }
@@ -531,6 +546,7 @@ async def get_message(
             "text": m.text,
             "date": m.date.isoformat() if m.date else None,
             "has_media": bool(m.raw_json and m.raw_json.get("media")),
+            "media_kind": _media_kind(m.raw_json),
             "topic_id": m.topic_id,
             "topic_name": m.topic_name,
         }
@@ -561,28 +577,63 @@ async def get_chat_members(chat_id: int) -> dict:
         return {"error": str(e)}
 
 
-async def get_file(chat_id: int, message_id: int, base64: bool = False) -> dict:
-    """Download file from message. Uses cache if file was already downloaded."""
+async def get_media_link(chat_id: int, message_id: int) -> dict:
+    """Time-limited public link to the message's media; caches the file once."""
     from src.config import get_settings
-    
+
     telegram_chat_id = await _resolve_chat_id(chat_id)
-    
+
     settings = get_settings()
+    media_links = settings.media_links
+    if not media_links.public_url:
+        # fail closed: without a public base URL there is nowhere to serve
+        # /files/<code> from, so refuse instead of handing out a dead link.
+        return {"error": "media_links.public_url is not configured"}
+
     if not settings.telegram.api_id or not settings.telegram.api_hash:
         return {"error": "Telegram API not configured"}
-    
+
     valid_sessions = [s for s in settings.telegram.sessions if s.session_string]
     if not valid_sessions:
         return {"error": "No valid sessions configured"}
-    
+
     listener = await _get_listener_for_chat(telegram_chat_id)
     if not listener:
         return {"error": "No valid session available for this chat"}
-    
+
     try:
-        result = await listener.download_file(telegram_chat_id, message_id, base64_flag=base64)
-        if result:
-            return result
-        return {"error": "No media found in message"}
+        prepared = await listener.prepare_media_link(
+            telegram_chat_id,
+            message_id,
+            max_download_seconds=media_links.max_download_seconds,
+            max_download_mb=media_links.max_download_mb,
+        )
     except Exception as e:
         return {"error": str(e)}
+
+    now = datetime.now(timezone.utc)
+    expires_at = now + timedelta(seconds=media_links.ttl_seconds)
+    download_code = uuid.uuid4().hex
+    async with get_session_factory()() as session:
+        await AttachmentDownloadRepository(session).insert(
+            download_code=download_code,
+            chat_id=telegram_chat_id,
+            message_id=message_id,
+            media_kind=prepared["media_kind"],
+            file_name=prepared["file_name"],
+            mime_type=prepared["mime_type"],
+            size_bytes=prepared["size_bytes"],
+            cached_file=prepared["cached_file"],
+            created_at=now,
+            expires_at=expires_at,
+        )
+
+    return {
+        "url": f"{media_links.public_url.rstrip('/')}/files/{download_code}",
+        "file_name": prepared["file_name"],
+        "media_kind": prepared["media_kind"],
+        "mime_type": prepared["mime_type"],
+        "size_bytes": prepared["size_bytes"],
+        "expires_at": expires_at.isoformat(),
+        "cached": prepared["cached"],
+    }
