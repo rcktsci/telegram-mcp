@@ -50,9 +50,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Generate date tag
+      - name: Generate date tag (Novosibirsk calendar)
         id: date
-        run: echo "tag=$(date +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
+        run: echo "tag=$(TZ=Asia/Novosibirsk date +'%Y-%m-%d')" >> "$GITHUB_OUTPUT"
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
