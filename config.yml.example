@@ -1,0 +1,50 @@
+# PostgreSQL connection settings
+postgres:
+  host: "localhost"
+  port: 5432
+  database: "telegram_mcp"
+  username: "telegram_mcp"
+  password: "your_password"
+
+# Telegram API credentials
+telegram:
+  # API ID from https://my.telegram.org/apps
+  api_id: 0
+  # API Hash from https://my.telegram.org/apps
+  api_hash: ""
+  # List of session strings (one per account)
+  sessions:
+    - "session1"
+
+  # Optional MTProxy settings (applied to all sessions)
+  # mtproxy_host: "mtproxy.example.com"
+  # mtproxy_port: 443
+  # mtproxy_secret: "your-secret"
+
+# Worker settings for message polling
+worker:
+  # How often to check for new messages
+  poll_interval_seconds: 5
+
+# History sweep: periodic bottom-up history fill over watching chats
+history_sweep:
+  # Hours between sweep passes
+  interval_hours: 6.0
+
+# Webhook settings (optional)
+webhook:
+  # Enable webhook notifications
+  enabled: false
+  # Webhook endpoint URL
+  url: ""
+  # How often to send webhook updates
+  interval_seconds: 60
+  # "batch" (all chats in one request) or "single" (one per chat)
+  mode: "batch"
+
+# Logging settings
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR
+  level: "INFO"
+  # Log format: "json" or "console"
+  format: "json"

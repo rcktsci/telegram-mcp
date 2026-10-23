@@ -1,0 +1,15 @@
+# Secrets and local state — never commit
+config.yml
+.env
+files/
+postgresql-data/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Local tooling
+.idea/
+.superpowers/
