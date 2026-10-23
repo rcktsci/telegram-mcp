@@ -1,4 +1,4 @@
-name: Build and Push Docker Image
+﻿name: Build and Push Docker Image
 
 on:
   push:
@@ -13,7 +13,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:18-alpine
         env:
           POSTGRES_DB: telegram_mcp
           POSTGRES_USER: telegram_mcp

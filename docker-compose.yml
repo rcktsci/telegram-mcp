@@ -1,6 +1,6 @@
-services:
+﻿services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     environment:
       POSTGRES_DB: telegram-mcp
       POSTGRES_USER: telegram-mcp
@@ -23,7 +23,7 @@ services:
       DB_NAME: telegram-mcp
       DB_USER: telegram-mcp
       DB_PASSWORD: telegram-mcp
-      # Change it, please. If empty — every /api/* request is rejected (fail closed).
+      # Change it, please. If empty вЂ” every /api/* request is rejected (fail closed).
       UI_MASTER_TOKEN: ""
     ports:
       - "8001:8000/tcp"   # MCP: Streamable HTTP (Bearer = agent token, mint in UI)
