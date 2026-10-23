@@ -69,6 +69,24 @@ your MCP client at `http://localhost:8001/mcp` with `Authorization: Bearer <agen
 Environment overrides: `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`,
 `UI_MASTER_TOKEN`.
 
+## Database
+
+PostgreSQL is required. The bundled `docker-compose.yml` starts it automatically
+(`postgres` service, data stored in `./postgresql-data`) — nothing to install.
+
+To use an external PostgreSQL instead, point the app at it via environment variables
+in `docker-compose.yml`:
+
+```yaml
+DB_HOST: 192.0.2.10
+DB_PORT: "5432"
+DB_NAME: telegram-mcp
+DB_USER: telegram-mcp
+DB_PASSWORD: your-password
+```
+
+Migrations run automatically on container start (`alembic upgrade head`).
+
 ## Security notes
 
 - Agent tokens are UUID4 bearer secrets scoped to folders/chats; a token that is not
