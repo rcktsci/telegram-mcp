@@ -6,7 +6,7 @@ and exposes them to AI agents over Streamable HTTP (stateless JSON-RPC, JSON res
 ## Features
 
 - Multi-account Telegram monitoring (Telethon user sessions) into PostgreSQL
-- Hourly history sweep with resume checkpoints (`history_sweep_upto` per chat)
+- Periodic history sweep with resume checkpoints (`history_sweep_upto` per chat)
 - Live updates via webhooks + on-demand reads
 - 7 MCP tools: list chats, read/search/count messages, single message, chat members, media links
 - Cross-chat full-text search (Russian + English morphology) and regex filtering
@@ -30,6 +30,9 @@ and exposes them to AI agents over Streamable HTTP (stateless JSON-RPC, JSON res
 | `get_media_link` | Time-limited public URL for a message's media (cached, served at `/files/<code>`) |
 
 `chat_id` arguments are **internal IDs** from `list_chats`, not Telegram chat IDs.
+
+Message results carry `has_media` (boolean) and `media_kind` (attachment type:
+photo, video, document, voice, audio, animation, sticker, video_note).
 
 ### Media links
 
