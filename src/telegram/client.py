@@ -5,6 +5,7 @@ import os
 from datetime import datetime
 from typing import Optional, AsyncGenerator
 from dataclasses import dataclass
+from uuid import uuid4
 
 from telethon import TelegramClient
 from telethon.network import ConnectionTcpMTProxyAbridged
@@ -70,6 +71,26 @@ _KIND_EXT = {
     "animation": ".mp4",
     "sticker": ".webp",
 }
+
+
+def cleanup_media_tmp_files(cache_dir: Optional[str] = None) -> int:
+    """Startup cleanup: remove *.tmp left by interrupted downloads.
+
+    cache_dir resolves at call time, so tests can monkeypatch the constant.
+    Only the tmp suffix matches — cached files never end with .tmp. Any
+    OSError (missing dir/file, unreadable directory, permissions) is
+    swallowed: cleanup returns 0 and must not take the application start down.
+    """
+    removed = 0
+    directory = cache_dir or MEDIA_CACHE_DIR
+    try:
+        for name in os.listdir(directory):
+            if name.endswith(".tmp"):
+                os.remove(os.path.join(directory, name))
+                removed += 1
+    except OSError:
+        pass
+    return removed
 
 
 def _media_of(message) -> tuple[Optional[str], object]:
@@ -1063,8 +1084,13 @@ class TelegramListener:
                 raise ValueError("download failed")
             # Сначала во временный файл, затем атомарный os.replace: обрыв
             # посреди записи не оставляет обрезанный файл, который следующий
-            # вызов принял бы за валидный кэш (exists-проверка).
-            tmp_file = filepath + ".tmp"
+            # вызов принял бы за валидный кэш (exists-проверка). Имя tmp
+            # уникально на вызов: два параллельных вызова того же сообщения
+            # не пишут в один файл, поэтому общий tmp не приводит ни к
+            # FileNotFoundError у «проигравшего» вызова, ни к обрезанному
+            # кэшу. os.replace атомарен — последний вызов просто перезапишет
+            # файл теми же байтами; двойное скачивание допустимо.
+            tmp_file = f"{filepath}.{uuid4().hex}.tmp"
             try:
                 with open(tmp_file, "wb") as fh:
                     fh.write(file_bytes)

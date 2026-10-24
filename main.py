@@ -21,7 +21,7 @@ from src.telegram.status import get_status_checker
 from src.telegram.folders import refresh_folders
 from src.api.ui import ui_app
 from src.api.auth import MasterTokenMiddleware
-from src.telegram.client import MEDIA_CACHE_DIR
+from src.telegram.client import MEDIA_CACHE_DIR, cleanup_media_tmp_files
 
 
 async def run_until_shutdown(shutdown_event: asyncio.Event, stop_callbacks, *service_tasks: asyncio.Task) -> None:
@@ -99,6 +99,9 @@ async def main():
     # Кэш вложений для get_media_link. БЕЗ volume mount (решение владельца):
     # пересоздание контейнера сбрасывает кэш, строки в БД живут дольше.
     os.makedirs(MEDIA_CACHE_DIR, exist_ok=True)
+    stale_tmp = cleanup_media_tmp_files()
+    if stale_tmp:
+        logger.info(f"Removed {stale_tmp} leftover .tmp file(s) from media cache")
 
     worker_manager = WorkerManager()
     set_worker_manager(worker_manager)

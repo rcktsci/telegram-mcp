@@ -8,6 +8,7 @@ finding a live photo message via the new compact media summary.
 """
 
 import asyncio
+import os
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -30,6 +31,7 @@ from src.mcp.auth import set_allowed_ids
 from src.telegram.client import (
     TelegramListener,
     _convert_datetime,
+    cleanup_media_tmp_files,
     media_kind_of,
     media_summary,
 )
@@ -581,6 +583,95 @@ async def test_slow_download_refused_by_timeout(db, monkeypatch, tmp_path, media
 
     assert "max_download_seconds" in result["error"]
     assert client.downloads == 0
+
+
+async def test_parallel_same_message_calls_leave_valid_cache(
+    db, monkeypatch, tmp_path, media_settings
+):
+    """Гонка двух параллельных get_media_link одного сообщения: уникальные
+    tmp-имена снимают её — оба вызова успешны, кэш на месте и валиден,
+    tmp-файлов не осталось. Двойное скачивание допустимо (байты те же)."""
+    internal = await _seed_chat()
+    # slow_seconds держит оба скачивания в полёте, пока второй вызов проходит
+    # exists-проверку: без этого первый успевает записать кэш раньше.
+    client = FakeClient(_msg_with_media("photo"), slow_seconds=0.2)
+    _use_listener(monkeypatch, _listener(client))
+    monkeypatch.setattr("src.telegram.client.MEDIA_CACHE_DIR", str(tmp_path))
+
+    # Дискриминатор гонки: os.replace протоколирует имя исходного файла.
+    # Новый код пишет два разных tmp-имени, старый с общим filepath + ".tmp" —
+    # одно, и тест обязан падать на проверке различия.
+    recorded: list[str] = []
+    real_replace = os.replace
+
+    def recording_replace(src, dst):
+        if src.endswith(".tmp"):  # только tmp нашего кэша: счётчик не зависит от чужих replace
+            recorded.append(src)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr("src.telegram.client.os.replace", recording_replace)
+
+    results = await asyncio.gather(
+        server_module.get_media_link_tool(chat_id=internal, message_id=5),
+        server_module.get_media_link_tool(chat_id=internal, message_id=5),
+    )
+
+    assert all("error" not in r for r in results)
+    assert client.downloads == 2  # exists-проверки оба прошли до первой записи
+    assert len(recorded) == 2
+    assert recorded[0] != recorded[1]  # у каждого вызова своё tmp-имя
+    cached = [p for p in tmp_path.iterdir() if not p.name.endswith(".tmp")]
+    assert len(cached) == 1
+    assert cached[0].read_bytes() == b"file-bytes"
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+async def test_interrupted_write_leaves_no_tmp(db, monkeypatch, tmp_path, media_settings):
+    """Прерванный вызов (исключение на os.replace) не оставляет свой tmp."""
+    internal = await _seed_chat()
+    _use_listener(monkeypatch, _listener(FakeClient(_msg_with_media("photo"))))
+    monkeypatch.setattr("src.telegram.client.MEDIA_CACHE_DIR", str(tmp_path))
+
+    def boom(src, dst):
+        raise OSError("interrupted")
+
+    monkeypatch.setattr("src.telegram.client.os.replace", boom)
+
+    result = await server_module.get_media_link_tool(chat_id=internal, message_id=5)
+
+    assert "error" in result
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_startup_cleanup_removes_tmp_files_only(tmp_path):
+    """Очистка на старте: *.tmp от прерванных вызовов удаляются,
+    обычные файлы кэша не трогаются."""
+    stale = tmp_path / "1600_5.0123abcd.tmp"
+    stale.write_bytes(b"half-written")
+    keep = tmp_path / "1600_5.jpg"
+    keep.write_bytes(b"file-bytes")
+
+    removed = cleanup_media_tmp_files(str(tmp_path))
+
+    assert removed == 1
+    assert not list(tmp_path.glob("*.tmp"))
+    assert keep.read_bytes() == b"file-bytes"
+
+
+def test_startup_cleanup_resolves_cache_dir_at_call_time(tmp_path, monkeypatch):
+    """cache_dir по умолчанию разрешается в момент вызова, не на импорте:
+    подмена MEDIA_CACHE_DIR действует на вызов без аргумента."""
+    stale = tmp_path / "1600_5.deadbeef.tmp"
+    stale.write_bytes(b"half-written")
+    monkeypatch.setattr("src.telegram.client.MEDIA_CACHE_DIR", str(tmp_path))
+
+    assert cleanup_media_tmp_files() == 1
+    assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_startup_cleanup_missing_dir_returns_zero(tmp_path):
+    """Несуществующий каталог: 0 и без исключений — старт не роняем."""
+    assert cleanup_media_tmp_files(str(tmp_path / "does-not-exist")) == 0
 
 
 # ----- GET /files/<code> ---------------------------------------------------
