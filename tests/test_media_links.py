@@ -18,6 +18,7 @@ import httpx
 import pytest
 
 import src.mcp.server as server_module
+import src.mcp.tools as mcp_tools
 from src.api.ui import ui_app
 from src.config import get_settings
 from src.db import (
@@ -36,6 +37,7 @@ from src.telegram.client import (
     media_summary,
 )
 from telethon import types as tt
+from telethon.network import ConnectionTcpMTProxyAbridged
 
 TG_CHAT = 1600
 
@@ -672,6 +674,128 @@ def test_startup_cleanup_resolves_cache_dir_at_call_time(tmp_path, monkeypatch):
 def test_startup_cleanup_missing_dir_returns_zero(tmp_path):
     """Несуществующий каталог: 0 и без исключений — старт не роняем."""
     assert cleanup_media_tmp_files(str(tmp_path / "does-not-exist")) == 0
+
+
+# ----- MCP listener MTProxy fallback (VM behind classic MTProxy) -----------
+
+PROXY = ("proxy.example.com", 8443, "ddsecret")
+
+
+def _proxy_settings() -> SimpleNamespace:
+    """Settings stub with an MTProxy in the telegram section."""
+    return SimpleNamespace(telegram=SimpleNamespace(
+        api_id=1, api_hash="hash",
+        sessions=[SimpleNamespace(session_string="session-string")],
+        mtproxy_host=PROXY[0], mtproxy_port=PROXY[1], mtproxy_secret=PROXY[2],
+    ))
+
+
+def test_listener_takes_mtproxy_from_settings(monkeypatch):
+    """MCP-путь (_build_listeners) прокси явно не передаёт: listener берёт
+    его из настроек сам — иначе на VM он подключается напрямую и падает."""
+    monkeypatch.setattr("src.config.get_settings", lambda: _proxy_settings())
+
+    listener = TelegramListener("session-string", 1, "hash")
+
+    assert listener.mtproxy == PROXY
+
+
+def test_listener_explicit_mtproxy_beats_settings(monkeypatch):
+    monkeypatch.setattr("src.config.get_settings", lambda: _proxy_settings())
+
+    listener = TelegramListener(
+        "session-string", 1, "hash",
+        mtproxy_host="explicit.example.com", mtproxy_port=7777,
+        mtproxy_secret="explicit-secret",
+    )
+
+    assert listener.mtproxy == ("explicit.example.com", 7777, "explicit-secret")
+
+
+def test_listener_without_mtproxy_connects_directly(monkeypatch):
+    monkeypatch.setattr("src.config.get_settings", lambda: SimpleNamespace(
+        telegram=SimpleNamespace(
+            api_id=1, api_hash="hash", sessions=[],
+            mtproxy_host=None, mtproxy_port=443, mtproxy_secret="",
+        ),
+    ))
+
+    listener = TelegramListener("session-string", 1, "hash")
+
+    assert listener.mtproxy is None
+
+
+def test_listener_survives_unavailable_settings(monkeypatch):
+    def broken():
+        raise RuntimeError("no config file")
+
+    monkeypatch.setattr("src.config.get_settings", broken)
+
+    listener = TelegramListener("session-string", 1, "hash")
+
+    assert listener.mtproxy is None
+
+
+async def test_listener_start_passes_proxy_to_telethon(monkeypatch):
+    """Прокси доходит до Telethon: kwarg proxy + MTProxy connection-класс."""
+    monkeypatch.setattr("src.config.get_settings", lambda: _proxy_settings())
+    captured: dict = {}
+
+    class FakeTelethon:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def on(self, event):
+            return lambda func: func
+
+        async def start(self):
+            raise RuntimeError("client start not needed in this test")
+
+    monkeypatch.setattr("src.telegram.client.TelegramClient", FakeTelethon)
+    # StringSession валидирует строку: подменяем, start() дальше конструктора
+    # клиента в этом тесте не идёт.
+    monkeypatch.setattr("src.telegram.client.StringSession", lambda s: SimpleNamespace())
+
+    listener = TelegramListener("session-string", 1, "hash")
+    await listener.start()
+    await asyncio.sleep(0)  # дать create_task(run_telegram_client) завершиться
+
+    assert captured["proxy"] == PROXY
+    assert captured["connection"] is ConnectionTcpMTProxyAbridged
+
+
+async def test_build_listeners_applies_mtproxy_from_settings(monkeypatch):
+    """Именно дефект с VM: _build_listeners прокси явно не передаёт —
+    constructor обязан взять его из настроек. Если не взял (mtproxy is None),
+    тест падает. Оборачиваем настоящий TelegramListener, чтобы ловить
+    поведение конструктора, а не подмены."""
+    monkeypatch.setattr("src.config.get_settings", lambda: _proxy_settings())
+
+    class FakeClient:
+        async def get_me(self):
+            return SimpleNamespace(id=777)
+
+    built: list = []
+
+    class RecordingListener(TelegramListener):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            built.append(self.mtproxy)
+            self._client = FakeClient()
+
+        async def start(self):
+            return None  # Telethon не нужен: дефект живёт в __init__
+
+        async def wait_ready(self, timeout: float = 120.0):
+            return True
+
+    monkeypatch.setattr("src.mcp.tools.TelegramListener", RecordingListener)
+    monkeypatch.setattr("src.mcp.tools._user_id_to_listener", None)
+    monkeypatch.setattr("src.mcp.tools._listeners_built_at", None)
+
+    await mcp_tools._build_listeners()
+
+    assert built == [PROXY]
 
 
 # ----- GET /files/<code> ---------------------------------------------------

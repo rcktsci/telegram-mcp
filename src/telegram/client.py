@@ -222,16 +222,30 @@ class TelegramListener:
         api_id: int,
         api_hash: str,
         mtproxy_host: Optional[str] = None,
-        mtproxy_port: int = 443,
+        mtproxy_port: Optional[int] = None,
         mtproxy_secret: str = "",
     ):
         self.session_string = session_string
         self.api_id = api_id
         self.api_hash = api_hash
         self.mtproxy = None
+        if not (mtproxy_host and mtproxy_secret):
+            # MCP-путь (_build_listeners) прокси явно не передаёт: без этого
+            # фолбэка на VM за MTProxy он уходит в Telegram напрямую и падает
+            # (воркер и статус-чекер передают прокси сами). Явные аргументы
+            # главнее настроек; настроек нет — подключаемся напрямую.
+            try:
+                from src.config import get_settings
+
+                telegram = get_settings().telegram
+                mtproxy_host = mtproxy_host or telegram.mtproxy_host
+                mtproxy_port = mtproxy_port or telegram.mtproxy_port
+                mtproxy_secret = mtproxy_secret or telegram.mtproxy_secret
+            except Exception:
+                logger.warning("Failed to read MTProxy settings; connecting directly", exc_info=True)
         if mtproxy_host and mtproxy_secret:
-            self.mtproxy = (mtproxy_host, mtproxy_port, mtproxy_secret)
-            logger.info(f"MTProxy configured: {mtproxy_host}:{mtproxy_port}")
+            self.mtproxy = (mtproxy_host, mtproxy_port or 443, mtproxy_secret)
+            logger.info(f"MTProxy configured: {self.mtproxy[0]}:{self.mtproxy[1]}")
         else:
             logger.info("MTProxy not configured, connecting directly")
         self._client: Optional[TelegramClient] = None

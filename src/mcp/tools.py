@@ -180,6 +180,8 @@ async def _build_listeners() -> None:
     for s in settings.telegram.sessions:
         if not s.session_string:
             continue
+        # Прокси явно не передаём: TelegramListener берёт его из настроек сам,
+        # иначе на VM за MTProxy MCP-путь подключается напрямую и не поднимается.
         listener = TelegramListener(
             s.session_string,
             settings.telegram.api_id,
